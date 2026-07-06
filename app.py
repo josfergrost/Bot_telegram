@@ -11,13 +11,14 @@ import yt_dlp
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
 TOKEN = os.getenv("TELEGRAM_TOKEN")
+RAPIDAPI_KEY = os.getenv("RAPIDAPI_KEY")
 PORT = int(os.getenv("PORT", 8080)) 
 
 if not TOKEN:
     raise ValueError("🚨 ERROR: No se encontró el TELEGRAM_TOKEN.")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("¡Bot todoterreno activo! Mándame enlaces de donde sea.")
+    await update.message.reply_text("¡Bot blindado con RapidAPI activo! Mándame tu enlace.")
 
 async def descargar_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url_original = update.message.text
@@ -26,50 +27,42 @@ async def descargar_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not url_original.startswith(("http://", "https://")):
         return
 
-    mensaje_estado = await update.message.reply_text("Desencriptando enlace... ⏳")
+    mensaje_estado = await update.message.reply_text("Interconectando con API dedicada... ⏳")
     video_url = None
     url_limpia = url_original.split('?')[0]
 
     # ==========================================
-    # MOTOR 1: API Cobalt (Actualizado a v10)
+    # MOTOR 1: RapidAPI (Anti-Firewalls)
     # ==========================================
-    cobalt_apis = [
-        "https://api.cobalt.tools/",          # Nuevo endpoint v10
-        "https://api.cobalt.tools/api/json",  # Fallback v9
-        "https://co.wuk.sh/",
-        "https://api.cobalt.my.id/"
-    ]
-    
-    headers = {
-        "Accept": "application/json",
-        "Content-Type": "application/json",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-    }
-    payload = {"url": url_limpia}
-    
-    for api_endpoint in cobalt_apis:
+    if RAPIDAPI_KEY:
         try:
-            res = requests.post(api_endpoint, json=payload, headers=headers, timeout=12)
+            api_url = "https://social-media-video-downloader.p.rapidapi.com/smvd/get/all"
+            querystring = {"url": url_original}
+            headers = {
+                "x-rapidapi-key": RAPIDAPI_KEY,
+                "x-rapidapi-host": "social-media-video-downloader.p.rapidapi.com"
+            }
+            
+            res = requests.get(api_url, headers=headers, params=querystring, timeout=15)
+            
             if res.status_code == 200:
                 data = res.json()
-                
-                # Cobalt v10 devuelve la URL directo, v9 usa 'status'
-                if data.get("status") != "error":
-                    # Soporte para video único o el primer video de un carrusel
-                    video_url = data.get("url") or (data.get("picker") and data["picker"][0].get("url"))
-                    
+                # Navegamos el JSON de esta API específica para sacar el link del MP4
+                if "links" in data and len(data["links"]) > 0:
+                    video_url = data["links"][0].get("link")
                     if video_url:
-                        logging.info(f"Éxito en API: {api_endpoint}")
-                        break
+                        logging.info("Éxito extrayendo video vía RapidAPI.")
+            else:
+                logging.warning(f"RapidAPI devolvió status {res.status_code}")
+                
         except Exception as e:
-            logging.warning(f"Timeout en {api_endpoint}, saltando...")
-            continue
+            logging.error(f"Fallo en conexión con RapidAPI: {e}")
 
     # ==========================================
     # MOTOR 2: yt-dlp (Respaldo Universal)
     # ==========================================
     if not video_url:
-        await mensaje_estado.edit_text("Usando motor de extracción profunda... ⚙️")
+        await mensaje_estado.edit_text("Usando motor de respaldo (yt-dlp)... ⚙️")
         try:
             ydl_opts = {
                 'quiet': True, 
@@ -78,30 +71,23 @@ async def descargar_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
             }
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url_original, download=False)
-                
-                # Buscamos la URL directa o dentro de un carrusel (playlist)
                 if info:
                     video_url = info.get('url')
                     if not video_url and 'entries' in info and len(info['entries']) > 0:
                         video_url = info['entries'][0].get('url')
-
-                if video_url:
-                    logging.info("Video extraído exitosamente vía yt-dlp.")
-                else:
-                    logging.warning("yt-dlp leyó la página, pero no encontró un archivo de video accesible (Posible muro de Login).")
         except Exception as e:
-            logging.error(f"Fallo total en yt-dlp: {e}")
+            logging.error(f"Error en yt-dlp: {e}")
 
     # ==========================================
     # DESCARGA Y ENVÍO
     # ==========================================
     if not video_url:
-        await mensaje_estado.edit_text("No pude extraer el video. El perfil es privado o bloqueó servidores de nube. ❌")
+        await mensaje_estado.edit_text("Los protocolos de seguridad del sitio bloquearon la extracción. ❌")
         return
 
     try:
-        filename = f"{chat_id}_video_extraido.mp4"
-        await mensaje_estado.edit_text("Descargando a máxima velocidad... 🚀")
+        filename = f"{chat_id}_video.mp4"
+        await mensaje_estado.edit_text("Descargando archivo con aria2... 🚀")
 
         comando_aria = ["aria2c", "-x", "8", "-s", "8", "-o", filename, video_url]
         subprocess.run(comando_aria, check=True)
@@ -109,14 +95,14 @@ async def descargar_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await mensaje_estado.edit_text("Subiendo a Telegram... 📤")
 
         with open(filename, 'rb') as video_file:
-            await update.message.reply_video(video=video_file, caption="¡Aquí lo tienes! 😎")
+            await update.message.reply_video(video=video_file, caption="¡Descarga completada! 😎")
 
         os.remove(filename)
         await mensaje_estado.delete()
 
     except Exception as e:
         logging.error(f"Error descargando o subiendo archivo: {e}")
-        await mensaje_estado.edit_text("Fallo al descargar o procesar el video. 😵")
+        await mensaje_estado.edit_text("Fallo al procesar o subir el video final. 😵")
         if 'filename' in locals() and os.path.exists(filename):
             os.remove(filename)
 
