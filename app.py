@@ -94,7 +94,7 @@ async def descargar_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await mensaje_estado.edit_text("⚠️ *Fallo en la red. Intentando motor de respaldo...*", parse_mode='Markdown')
             
         try:
-           ydl_opts = {
+            ydl_opts = {
                 'quiet': False,
                 'verbose': True,
                 'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
