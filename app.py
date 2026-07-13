@@ -29,10 +29,13 @@ if os.path.exists(SECRET_COOKIE_FILE):
 if not TOKEN:
     raise ValueError("🚨 ERROR: No se encontró el TELEGRAM_TOKEN.")
 
+# Lista de dominios que procesaremos 100% gratis con nuestras propias cookies
+DOMINIOS_LOCALES = ["instagram.com", "tiktok.com", "twitter.com", "x.com"]
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     mensaje_bienvenida = (
-        "🤖 **Bot de Extracción con Sesión Activo**\n\n"
-        "Sistema listo. Motor local optimizado para evadir firewalls de Meta."
+        "🤖 **Bot de Extracción Multi-Plataforma Activo**\n\n"
+        "Sistema listo. Motor local optimizado para evadir firewalls de Meta, TikTok y X."
     )
     await update.message.reply_text(mensaje_bienvenida, parse_mode='Markdown')
 
@@ -49,12 +52,13 @@ async def descargar_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     descarga_lista_en_disco = False
     filename = f"{chat_id}_media.mp4"
 
-    es_instagram_con_sesion = "instagram.com" in url_original and os.path.exists(WORKING_COOKIE_FILE)
+    # Ruteo Inteligente: Verificamos si el enlace está en nuestra lista VIP
+    es_dominio_local = any(dom in url_original for dom in DOMINIOS_LOCALES) and os.path.exists(WORKING_COOKIE_FILE)
 
     # ==========================================
-    # MOTOR 1: API Dedicada (Para todo menos IG local)
+    # MOTOR 1: API Dedicada (Solo para redes que NO están en la lista VIP)
     # ==========================================
-    if API_KEY and not es_instagram_con_sesion:
+    if API_KEY and not es_dominio_local:
         await mensaje_estado.edit_text("📡 *Consultando API principal...*", parse_mode='Markdown')
         try:
             api_url = "https://social-download-all-in-one.p.rapidapi.com/v1/social/autolink"
@@ -85,30 +89,28 @@ async def descargar_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logging.error(f"Fallo en API principal: {e}")
 
     # ==========================================
-    # MOTOR 2: yt-dlp (Descarga Directa)
+    # MOTOR 2: yt-dlp (Descarga Directa con Sesiones)
     # ==========================================
     if not video_url:
-        if es_instagram_con_sesion:
-            await mensaje_estado.edit_text("🔑 *Sesión detectada. Descargando internamente...*", parse_mode='Markdown')
+        if es_dominio_local:
+            await mensaje_estado.edit_text("🔑 *Sesión VIP detectada. Descargando internamente...*", parse_mode='Markdown')
         else:
-            await mensaje_estado.edit_text("⚠️ *Fallo en la red. Intentando motor de respaldo...*", parse_mode='Markdown')
+            await mensaje_estado.edit_text("⚠️ *Fallo en la red. Intentando motor local de respaldo...*", parse_mode='Markdown')
             
         try:
             ydl_opts = {
                 'quiet': True,
                 'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
                 'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
-                'outtmpl': filename, # Le decimos a yt-dlp que lo guarde directamente en nuestro archivo
+                'outtmpl': filename,
                 'merge_output_format': 'mp4'
             }
             if os.path.exists(WORKING_COOKIE_FILE):
                 ydl_opts['cookiefile'] = WORKING_COOKIE_FILE
 
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                # Ya no extraemos el link, mandamos descargar el archivo de un solo golpe
                 ydl.download([url_original])
                 
-                # Verificamos que el archivo realmente se haya guardado
                 if os.path.exists(filename):
                     descarga_lista_en_disco = True
                     logging.info("Resuelto y descargado exitosamente vía yt-dlp.")
@@ -119,7 +121,7 @@ async def descargar_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # VALIDACIÓN FINAL
     # ==========================================
     if not video_url and not descarga_lista_en_disco:
-        msg_error = "❌ **Extracción denegada.**\nEl contenido es privado o caducó."
+        msg_error = "❌ **Extracción denegada.**\nEl contenido es privado, caducó, o la plataforma bloqueó la IP."
         await mensaje_estado.edit_text(msg_error, parse_mode='Markdown')
         return
 
@@ -127,7 +129,6 @@ async def descargar_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # DESCARGA ARIA2C Y SUBIDA A TELEGRAM
     # ==========================================
     try:
-        # Si yt-dlp no lo descargó y solo tenemos el link de la API, usamos aria2c
         if not descarga_lista_en_disco:
             await mensaje_estado.edit_text("⬇️ *Descargando archivo acelerado...*", parse_mode='Markdown')
             comando_aria = ["aria2c", "--user-agent", "Mozilla/5.0", "-x", "8", "-s", "8", "-o", filename]
