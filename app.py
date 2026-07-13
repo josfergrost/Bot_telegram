@@ -16,11 +16,9 @@ TOKEN = os.getenv("TELEGRAM_TOKEN")
 API_KEY = os.getenv("RAPIDAPI_KEY") or os.getenv("ZM_API_KEY") 
 PORT = int(os.getenv("PORT", 8080)) 
 
-# Rutas de los archivos
 SECRET_COOKIE_FILE = "/etc/secrets/cookies.txt"
 WORKING_COOKIE_FILE = "/tmp/cookies.txt"
 
-# Copiar el archivo secreto a un directorio con permisos de escritura
 if os.path.exists(SECRET_COOKIE_FILE):
     try:
         shutil.copy2(SECRET_COOKIE_FILE, WORKING_COOKIE_FILE)
@@ -46,9 +44,11 @@ async def descargar_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     mensaje_estado = await update.message.reply_text("🔄 *Analizando petición...*", parse_mode='Markdown')
+    
     video_url = None
+    descarga_lista_en_disco = False
+    filename = f"{chat_id}_media.mp4"
 
-    # Ruteo Inteligente: Si es Instagram y tenemos cookies editables, vamos directo con yt-dlp
     es_instagram_con_sesion = "instagram.com" in url_original and os.path.exists(WORKING_COOKIE_FILE)
 
     # ==========================================
@@ -85,57 +85,56 @@ async def descargar_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logging.error(f"Fallo en API principal: {e}")
 
     # ==========================================
-    # MOTOR 2: yt-dlp (Principal para IG, Respaldo para el resto)
+    # MOTOR 2: yt-dlp (Descarga Directa)
     # ==========================================
     if not video_url:
         if es_instagram_con_sesion:
-            await mensaje_estado.edit_text("🔑 *Sesión detectada. Extrayendo desde motor local...*", parse_mode='Markdown')
+            await mensaje_estado.edit_text("🔑 *Sesión detectada. Descargando internamente...*", parse_mode='Markdown')
         else:
             await mensaje_estado.edit_text("⚠️ *Fallo en la red. Intentando motor de respaldo...*", parse_mode='Markdown')
             
         try:
             ydl_opts = {
-                'quiet': False,
-                'verbose': True,
+                'quiet': True,
                 'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-                'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best'
+                'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+                'outtmpl': filename, # Le decimos a yt-dlp que lo guarde directamente en nuestro archivo
+                'merge_output_format': 'mp4'
             }
-            # Inyectamos la copia editable del archivo de texto a yt-dlp
             if os.path.exists(WORKING_COOKIE_FILE):
                 ydl_opts['cookiefile'] = WORKING_COOKIE_FILE
 
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url_original, download=False)
-                if info:
-                    video_url = info.get('url') or (info.get('entries') and info['entries'][0].get('url'))
-                    if video_url:
-                        logging.info("Resuelto exitosamente vía yt-dlp local.")
+                # Ya no extraemos el link, mandamos descargar el archivo de un solo golpe
+                ydl.download([url_original])
+                
+                # Verificamos que el archivo realmente se haya guardado
+                if os.path.exists(filename):
+                    descarga_lista_en_disco = True
+                    logging.info("Resuelto y descargado exitosamente vía yt-dlp.")
         except Exception as e:
-            logging.error(f"yt-dlp no pudo extraer el enlace localmente: {e}")
+            logging.error(f"yt-dlp falló la descarga: {e}")
 
     # ==========================================
     # VALIDACIÓN FINAL
     # ==========================================
-    if not video_url:
+    if not video_url and not descarga_lista_en_disco:
         msg_error = "❌ **Extracción denegada.**\nEl contenido es privado o caducó."
         await mensaje_estado.edit_text(msg_error, parse_mode='Markdown')
         return
 
     # ==========================================
-    # DESCARGA Y ENVÍO A TELEGRAM
+    # DESCARGA ARIA2C Y SUBIDA A TELEGRAM
     # ==========================================
-    filename = f"{chat_id}_media.mp4"
     try:
-        await mensaje_estado.edit_text("⬇️ *Descargando archivo acelerado...*", parse_mode='Markdown')
-        
-        comando_aria = ["aria2c", "--user-agent", "Mozilla/5.0", "-x", "8", "-s", "8", "-o", filename]
-        
-        # Le pasamos la copia editable a aria2c también
-        if os.path.exists(WORKING_COOKIE_FILE):
-            comando_aria.extend(["--load-cookies", WORKING_COOKIE_FILE])
-            
-        comando_aria.append(video_url)
-        subprocess.run(comando_aria, check=True)
+        # Si yt-dlp no lo descargó y solo tenemos el link de la API, usamos aria2c
+        if not descarga_lista_en_disco:
+            await mensaje_estado.edit_text("⬇️ *Descargando archivo acelerado...*", parse_mode='Markdown')
+            comando_aria = ["aria2c", "--user-agent", "Mozilla/5.0", "-x", "8", "-s", "8", "-o", filename]
+            if os.path.exists(WORKING_COOKIE_FILE):
+                comando_aria.extend(["--load-cookies", WORKING_COOKIE_FILE])
+            comando_aria.append(video_url)
+            subprocess.run(comando_aria, check=True)
 
         await mensaje_estado.edit_text("⬆️ *Subiendo a Telegram...*", parse_mode='Markdown')
         
@@ -167,7 +166,7 @@ async def descargar_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logging.error(f"Fallo en transferencia: {e}")
         await mensaje_estado.edit_text("🛑 **Error de transferencia.**\nTiempo de respuesta excedido.", parse_mode='Markdown')
     finally:
-        if 'filename' in locals() and os.path.exists(filename):
+        if os.path.exists(filename):
             os.remove(filename)
 
 def run_dummy_server():
