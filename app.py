@@ -14,17 +14,12 @@ logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 API_KEY = os.getenv("RAPIDAPI_KEY") or os.getenv("ZM_API_KEY") 
 PORT = int(os.getenv("PORT", 8080)) 
-COOKIE_DATA = os.getenv("INSTAGRAM_COOKIES", "")
+
+# Render monta los Secret Files automáticamente en esta ruta:
+COOKIE_FILE = "/etc/secrets/cookies.txt"
 
 if not TOKEN:
     raise ValueError("🚨 ERROR: No se encontró el TELEGRAM_TOKEN.")
-
-# Inicializar el archivo de cookies en el sistema de archivos de Render
-COOKIE_FILE = "cookies.txt"
-if COOKIE_DATA:
-    with open(COOKIE_FILE, "w") as f:
-        f.write(COOKIE_DATA)
-    logging.info("Archivo cookies.txt generado exitosamente desde las variables de entorno.")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     mensaje_bienvenida = (
