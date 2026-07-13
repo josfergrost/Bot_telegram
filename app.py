@@ -2,9 +2,8 @@ import os
 import subprocess
 import logging
 import threading
-import requests
 import asyncio
-import re
+import requests
 from http.server import SimpleHTTPRequestHandler, HTTPServer
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -13,76 +12,56 @@ import yt_dlp
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
 TOKEN = os.getenv("TELEGRAM_TOKEN")
-RAPIDAPI_KEY = os.getenv("RAPIDAPI_KEY")
+API_KEY = os.getenv("RAPIDAPI_KEY") or os.getenv("ZM_API_KEY") 
 PORT = int(os.getenv("PORT", 8080)) 
+COOKIE_DATA = os.getenv("INSTAGRAM_COOKIES", "")
 
 if not TOKEN:
     raise ValueError("🚨 ERROR: No se encontró el TELEGRAM_TOKEN.")
 
+# Inicializar el archivo de cookies en el sistema de archivos de Render
+COOKIE_FILE = "cookies.txt"
+if COOKIE_DATA:
+    with open(COOKIE_FILE, "w") as f:
+        f.write(COOKIE_DATA)
+    logging.info("Archivo cookies.txt generado exitosamente desde las variables de entorno.")
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     mensaje_bienvenida = (
-        "🤖 **Bot Híbrido Activo**\n\n"
-        "1. Envíe un enlace normal (para contenido público).\n"
-        "2. Pegue un comando `cURL` completo (para inyectar cookies y bajar contenido privado)."
+        "🤖 **Bot de Extracción con Sesión Activo**\n\n"
+        "Sistema listo. Motor local optimizado para evadir firewalls de Meta."
     )
     await update.message.reply_text(mensaje_bienvenida, parse_mode='Markdown')
 
 async def descargar_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    texto = update.message.text.strip()
+    url_original = update.message.text.strip()
     chat_id = update.message.chat_id
     
-    es_curl = texto.startswith("curl ")
-    url_procesar = texto
-
-    if not (texto.startswith(("http://", "https://")) or es_curl):
+    if not url_original.startswith(("http://", "https://")):
         return
 
-    mensaje_estado = await update.message.reply_text("🔄 *Procesando solicitud...*", parse_mode='Markdown')
+    mensaje_estado = await update.message.reply_text("🔄 *Analizando petición...*", parse_mode='Markdown')
     video_url = None
-    cookie_extraida = ""
-    ua_extraido = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15"
+
+    # Ruteo Inteligente: Si es Instagram y tenemos cookies, vamos directo con yt-dlp
+    es_instagram_con_sesion = "instagram.com" in url_original and os.path.exists(COOKIE_FILE)
 
     # ==========================================
-    # PARSEO DE COMANDO cURL (Estilo Bash Script)
+    # MOTOR 1: API Dedicada (Para todo menos IG local)
     # ==========================================
-    if es_curl:
-        await mensaje_estado.edit_text("🕵️‍♂️ *Comando cURL detectado. Extrayendo cabeceras...*", parse_mode='Markdown')
-        
-        # 1. Extraer URL
-        match_url = re.search(r"(https?://[^\s'\"]+)", texto)
-        if match_url:
-            url_procesar = match_url.group(1).replace("\\", "")
-        else:
-            await mensaje_estado.edit_text("❌ *No se encontró una URL válida en el comando cURL.*", parse_mode='Markdown')
-            return
+    if API_KEY and not es_instagram_con_sesion:
+        await mensaje_estado.edit_text("📡 *Consultando API principal...*", parse_mode='Markdown')
+        try:
+            api_url = "https://social-download-all-in-one.p.rapidapi.com/v1/social/autolink"
+            payload = {"url": url_original}
+            headers = {
+                "content-type": "application/json",
+                "x-rapidapi-host": "social-download-all-in-one.p.rapidapi.com",
+                "x-rapidapi-key": API_KEY
+            }
             
-        # 2. Extraer Cookie
-        match_cookie = re.search(r"(?i)-H\s+['\"]cookie:\s*([^'\"]+)['\"]", texto)
-        if match_cookie:
-            cookie_extraida = match_cookie.group(1)
-            
-        # 3. Extraer User-Agent
-        match_ua = re.search(r"(?i)-H\s+['\"]user-agent:\s*([^'\"]+)['\"]", texto)
-        if match_ua:
-            ua_extraido = match_ua.group(1)
-
-    # ==========================================
-    # MOTOR 1: RapidAPI (Solo para enlaces normales)
-    # ==========================================
-    if RAPIDAPI_KEY and not es_curl:
-        api_url = "https://social-download-all-in-one.p.rapidapi.com/v1/social/autolink"
-        payload = {"url": url_procesar}
-        headers = {
-            "content-type": "application/json",
-            "x-rapidapi-host": "social-download-all-in-one.p.rapidapi.com",
-            "x-rapidapi-key": RAPIDAPI_KEY
-        }
-        
-        for intento in range(2):
-            try:
-                await mensaje_estado.edit_text(f"📡 *Consultando API pública* `[Intento {intento+1}/2]`...", parse_mode='Markdown')
+            for intento in range(2):
                 res = requests.post(api_url, json=payload, headers=headers, timeout=15)
-                
                 if res.status_code == 200:
                     data = res.json()
                     if "medias" in data and len(data["medias"]) > 0:
@@ -93,48 +72,46 @@ async def descargar_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         video_url = data.get("url")
                         
                     if video_url:
+                        logging.info("Éxito usando la API principal.")
                         break
                 elif res.status_code in [500, 502, 503, 504]:
                     await asyncio.sleep(2)
-                else:
-                    break
-            except Exception as e:
-                logging.error(f"Error RapidAPI: {e}")
-                await asyncio.sleep(2)
+        except Exception as e:
+            logging.error(f"Fallo en API principal: {e}")
 
     # ==========================================
-    # MOTOR 2: yt-dlp (Principal para cURL, Respaldo para links normales)
+    # MOTOR 2: yt-dlp (Principal para IG, Respaldo para el resto)
     # ==========================================
     if not video_url:
-        if es_curl:
-            await mensaje_estado.edit_text("⚙️ *Inyectando sesión privada en motor de extracción...*", parse_mode='Markdown')
+        if es_instagram_con_sesion:
+            await mensaje_estado.edit_text("🔑 *Sesión detectada. Extrayendo desde motor local...*", parse_mode='Markdown')
         else:
-            await mensaje_estado.edit_text("⚠️ *Fallo en API. Ejecutando motor de contingencia...*", parse_mode='Markdown')
+            await mensaje_estado.edit_text("⚠️ *Fallo en la red. Intentando motor de respaldo...*", parse_mode='Markdown')
             
         try:
             ydl_opts = {
                 'quiet': True,
-                'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
-                'http_headers': {
-                    'User-Agent': ua_extraido
-                }
+                'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+                'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best'
             }
-            # ¡Si extrajimos una cookie del chat de Telegram, se la pasamos a yt-dlp!
-            if cookie_extraida:
-                ydl_opts['http_headers']['Cookie'] = cookie_extraida
-                
+            # Inyectamos el archivo de texto a yt-dlp
+            if os.path.exists(COOKIE_FILE):
+                ydl_opts['cookiefile'] = COOKIE_FILE
+
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url_procesar, download=False)
+                info = ydl.extract_info(url_original, download=False)
                 if info:
                     video_url = info.get('url') or (info.get('entries') and info['entries'][0].get('url'))
+                    if video_url:
+                        logging.info("Resuelto exitosamente vía yt-dlp local.")
         except Exception as e:
-            logging.error(f"yt-dlp falló: {e}")
+            logging.error(f"yt-dlp no pudo extraer el enlace localmente: {e}")
 
     # ==========================================
-    # VALIDACIÓN DE PRIVACIDAD
+    # VALIDACIÓN FINAL
     # ==========================================
     if not video_url:
-        msg_error = "❌ **Extracción denegada.**\nEl contenido es privado. Utiliza la opción de 'Copiar como cURL' en tu navegador y pega el código aquí."
+        msg_error = "❌ **Extracción denegada.**\nEl contenido es privado o caducó."
         await mensaje_estado.edit_text(msg_error, parse_mode='Markdown')
         return
 
@@ -145,17 +122,17 @@ async def descargar_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         await mensaje_estado.edit_text("⬇️ *Descargando archivo acelerado...*", parse_mode='Markdown')
         
-        # Preparamos los argumentos base de aria2c
-        comando_aria = ["aria2c", "--user-agent", ua_extraido, "-x", "8", "-s", "8", "-o", filename]
+        # Preparamos el comando de aria2c
+        comando_aria = ["aria2c", "--user-agent", "Mozilla/5.0", "-x", "8", "-s", "8", "-o", filename]
         
-        # Si había cookie, se la pasamos a aria2c para que no lo bloqueen en el último paso
-        if cookie_extraida:
-            comando_aria.extend(["--header", f"Cookie: {cookie_extraida}"])
+        # Si aria2c necesita bajar de los servidores de Meta, le damos las cookies también
+        if os.path.exists(COOKIE_FILE):
+            comando_aria.extend(["--load-cookies", COOKIE_FILE])
             
         comando_aria.append(video_url)
         subprocess.run(comando_aria, check=True)
 
-        await mensaje_estado.edit_text("⬆️ *Subiendo a Telegram, por favor espere...*", parse_mode='Markdown')
+        await mensaje_estado.edit_text("⬆️ *Subiendo a Telegram...*", parse_mode='Markdown')
         
         exito_subida = False
         for intento_subida in range(3):
@@ -172,7 +149,6 @@ async def descargar_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 exito_subida = True
                 break
             except Exception as e:
-                logging.error(f"Intento {intento_subida+1} de subida falló: {e}")
                 if intento_subida < 2:
                     await mensaje_estado.edit_text(f"⚠️ *Interrupción de red. Reintentando subida* `[{intento_subida+2}/3]`...", parse_mode='Markdown')
                     await asyncio.sleep(3)
@@ -183,8 +159,8 @@ async def descargar_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await mensaje_estado.delete()
 
     except Exception as e:
-        logging.error(f"Fallo crítico en transferencia: {e}")
-        await mensaje_estado.edit_text("🛑 **Error de transferencia.**\nLos servidores excedieron el tiempo de respuesta.", parse_mode='Markdown')
+        logging.error(f"Fallo en transferencia: {e}")
+        await mensaje_estado.edit_text("🛑 **Error de transferencia.**\nTiempo de respuesta excedido.", parse_mode='Markdown')
     finally:
         if 'filename' in locals() and os.path.exists(filename):
             os.remove(filename)
@@ -192,7 +168,7 @@ async def descargar_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def run_dummy_server():
     server_address = ('0.0.0.0', PORT)
     httpd = HTTPServer(server_address, SimpleHTTPRequestHandler)
-    logging.info(f"Servidor HTTP dummy corriendo en el puerto {PORT}...")
+    logging.info(f"Servidor dummy en el puerto {PORT}...")
     httpd.serve_forever()
 
 def main():
@@ -200,7 +176,6 @@ def main():
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, descargar_video))
-    logging.info("Iniciando Polling a Telegram...")
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == '__main__':
