@@ -5,6 +5,7 @@ import threading
 import asyncio
 import requests
 import shutil
+import uuid
 from http.server import SimpleHTTPRequestHandler, HTTPServer
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -15,6 +16,8 @@ logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 API_KEY = os.getenv("RAPIDAPI_KEY") or os.getenv("ZM_API_KEY") 
 PORT = int(os.getenv("PORT", 8080)) 
+# Render inyecta RENDER_EXTERNAL_URL automáticamente en los Web Services
+EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL", f"http://localhost:{PORT}") 
 
 SECRET_COOKIE_FILE = "/etc/secrets/cookies.txt"
 WORKING_COOKIE_FILE = "/tmp/cookies.txt"
@@ -29,13 +32,22 @@ if os.path.exists(SECRET_COOKIE_FILE):
 if not TOKEN:
     raise ValueError("🚨 ERROR: No se encontró el TELEGRAM_TOKEN.")
 
-# Lista de dominios que procesaremos 100% gratis con nuestras propias cookies
 DOMINIOS_LOCALES = ["instagram.com", "tiktok.com", "twitter.com", "x.com"]
+
+# Función de auto-limpieza para los videos pesados alojados en el CDN
+async def programar_autodestruccion(filepath, delay_seconds=3600):
+    await asyncio.sleep(delay_seconds)
+    if os.path.exists(filepath):
+        try:
+            os.remove(filepath)
+            logging.info(f"🗑️ Archivo temporal pesado eliminado: {filepath}")
+        except Exception as e:
+            logging.error(f"No se pudo borrar {filepath}: {e}")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     mensaje_bienvenida = (
         "🤖 **Bot de Extracción Multi-Plataforma Activo**\n\n"
-        "Sistema listo. Motor local optimizado para evadir firewalls de Meta, TikTok y X."
+        "Sistema con CDN híbrido listo. Envíe un enlace."
     )
     await update.message.reply_text(mensaje_bienvenida, parse_mode='Markdown')
 
@@ -50,13 +62,15 @@ async def descargar_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     video_url = None
     descarga_lista_en_disco = False
-    filename = f"{chat_id}_media.mp4"
+    
+    # Añadimos un UUID corto para evitar colisiones si descargas varios archivos al mismo tiempo
+    codigo_unico = uuid.uuid4().hex[:6]
+    filename = f"{chat_id}_{codigo_unico}_media.mp4"
 
-    # Ruteo Inteligente: Verificamos si el enlace está en nuestra lista VIP
     es_dominio_local = any(dom in url_original for dom in DOMINIOS_LOCALES) and os.path.exists(WORKING_COOKIE_FILE)
 
     # ==========================================
-    # MOTOR 1: API Dedicada (Solo para redes que NO están en la lista VIP)
+    # MOTOR 1: API Dedicada
     # ==========================================
     if API_KEY and not es_dominio_local:
         await mensaje_estado.edit_text("📡 *Consultando API principal...*", parse_mode='Markdown')
@@ -89,11 +103,11 @@ async def descargar_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logging.error(f"Fallo en API principal: {e}")
 
     # ==========================================
-    # MOTOR 2: yt-dlp (Descarga Directa con Sesiones)
+    # MOTOR 2: yt-dlp (Descarga Directa)
     # ==========================================
     if not video_url:
         if es_dominio_local:
-            await mensaje_estado.edit_text("🔑 *Sesión VIP detectada. Descargando internamente...*", parse_mode='Markdown')
+            await mensaje_estado.edit_text("🔑 *Sesión detectada. Extrayendo máxima calidad...*", parse_mode='Markdown')
         else:
             await mensaje_estado.edit_text("⚠️ *Fallo en la red. Intentando motor local de respaldo...*", parse_mode='Markdown')
             
@@ -101,6 +115,7 @@ async def descargar_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ydl_opts = {
                 'quiet': True,
                 'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+                # Aquí pedimos máxima calidad absoluta, sin importar el peso, porque ya tenemos el CDN
                 'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
                 'outtmpl': filename,
                 'merge_output_format': 'mp4'
@@ -126,7 +141,7 @@ async def descargar_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # ==========================================
-    # DESCARGA ARIA2C Y SUBIDA A TELEGRAM
+    # DESCARGA ARIA2C Y ENRUTAMIENTO INTELIGENTE
     # ==========================================
     try:
         if not descarga_lista_en_disco:
@@ -137,43 +152,65 @@ async def descargar_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
             comando_aria.append(video_url)
             subprocess.run(comando_aria, check=True)
 
-        await mensaje_estado.edit_text("⬆️ *Subiendo a Telegram...*", parse_mode='Markdown')
-        
-        exito_subida = False
-        for intento_subida in range(3):
-            try:
-                with open(filename, 'rb') as video_file:
-                    await update.message.reply_video(
-                        video=video_file, 
-                        caption="✅ **Procesamiento completado**",
-                        parse_mode='Markdown',
-                        read_timeout=120,
-                        write_timeout=120,
-                        connect_timeout=60
-                    )
-                exito_subida = True
-                break
-            except Exception as e:
-                if intento_subida < 2:
-                    await mensaje_estado.edit_text(f"⚠️ *Interrupción de red. Reintentando subida* `[{intento_subida+2}/3]`...", parse_mode='Markdown')
-                    await asyncio.sleep(3)
-                else:
-                    raise e
+        # Calculamos el tamaño del archivo en Megabytes
+        peso_bytes = os.path.getsize(filename)
+        peso_mb = peso_bytes / (1024 * 1024)
 
-        if exito_subida:
-            await mensaje_estado.delete()
+        if peso_mb > 49.0:
+            # RUTEO CDN: El archivo es muy pesado, mandamos el link directo
+            enlace_cdn = f"{EXTERNAL_URL}/{filename}"
+            mensaje_cdn = (
+                f"🗄️ **Video demasiado pesado para Telegram** ({peso_mb:.1f} MB).\n\n"
+                f"🔗 **[DESCARGAR DIRECTAMENTE AQUÍ]({enlace_cdn})**\n\n"
+                f"_El enlace expirará automáticamente en 1 hora por seguridad._"
+            )
+            await mensaje_estado.edit_text(mensaje_cdn, parse_mode='Markdown')
+            
+            # Programamos la destrucción del archivo en 3600 segundos (1 hora)
+            asyncio.create_task(programar_autodestruccion(filename, 3600))
+            
+        else:
+            # RUTEO CLÁSICO: El archivo entra en el límite de Telegram
+            await mensaje_estado.edit_text("⬆️ *Subiendo a Telegram...*", parse_mode='Markdown')
+            exito_subida = False
+            for intento_subida in range(3):
+                try:
+                    with open(filename, 'rb') as video_file:
+                        await update.message.reply_video(
+                            video=video_file, 
+                            caption="✅ **Procesamiento completado**",
+                            parse_mode='Markdown',
+                            read_timeout=120,
+                            write_timeout=120,
+                            connect_timeout=60
+                        )
+                    exito_subida = True
+                    break
+                except Exception as e:
+                    if intento_subida < 2:
+                        await mensaje_estado.edit_text(f"⚠️ *Interrupción de red. Reintentando subida* `[{intento_subida+2}/3]`...", parse_mode='Markdown')
+                        await asyncio.sleep(3)
+                    else:
+                        raise e
+
+            if exito_subida:
+                await mensaje_estado.delete()
+                # Lo borramos de inmediato porque ya se subió a Telegram
+                if os.path.exists(filename):
+                    os.remove(filename)
 
     except Exception as e:
-        logging.error(f"Fallo en transferencia: {e}")
+        logging.error(f"Fallo general en transferencia o lectura: {e}")
         await mensaje_estado.edit_text("🛑 **Error de transferencia.**\nTiempo de respuesta excedido.", parse_mode='Markdown')
-    finally:
         if os.path.exists(filename):
             os.remove(filename)
 
+# El servidor HTTP Dummy ahora tiene la doble función de mantener vivo Render 
+# y servir los archivos pesados estáticos de la carpeta raíz.
 def run_dummy_server():
     server_address = ('0.0.0.0', PORT)
     httpd = HTTPServer(server_address, SimpleHTTPRequestHandler)
-    logging.info(f"Servidor dummy en el puerto {PORT}...")
+    logging.info(f"Servidor HTTP y CDN activo en el puerto {PORT}...")
     httpd.serve_forever()
 
 def main():
