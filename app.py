@@ -4,6 +4,7 @@ import logging
 import threading
 import asyncio
 import requests
+import shutil
 from http.server import SimpleHTTPRequestHandler, HTTPServer
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -15,8 +16,17 @@ TOKEN = os.getenv("TELEGRAM_TOKEN")
 API_KEY = os.getenv("RAPIDAPI_KEY") or os.getenv("ZM_API_KEY") 
 PORT = int(os.getenv("PORT", 8080)) 
 
-# Render monta los Secret Files automáticamente en esta ruta:
-COOKIE_FILE = "/etc/secrets/cookies.txt"
+# Rutas de los archivos
+SECRET_COOKIE_FILE = "/etc/secrets/cookies.txt"
+WORKING_COOKIE_FILE = "/tmp/cookies.txt"
+
+# Copiar el archivo secreto a un directorio con permisos de escritura
+if os.path.exists(SECRET_COOKIE_FILE):
+    try:
+        shutil.copy2(SECRET_COOKIE_FILE, WORKING_COOKIE_FILE)
+        logging.info("Archivo de cookies copiado a /tmp/ exitosamente.")
+    except Exception as e:
+        logging.error(f"Error copiando cookies: {e}")
 
 if not TOKEN:
     raise ValueError("🚨 ERROR: No se encontró el TELEGRAM_TOKEN.")
@@ -38,8 +48,8 @@ async def descargar_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     mensaje_estado = await update.message.reply_text("🔄 *Analizando petición...*", parse_mode='Markdown')
     video_url = None
 
-    # Ruteo Inteligente: Si es Instagram y tenemos cookies, vamos directo con yt-dlp
-    es_instagram_con_sesion = "instagram.com" in url_original and os.path.exists(COOKIE_FILE)
+    # Ruteo Inteligente: Si es Instagram y tenemos cookies editables, vamos directo con yt-dlp
+    es_instagram_con_sesion = "instagram.com" in url_original and os.path.exists(WORKING_COOKIE_FILE)
 
     # ==========================================
     # MOTOR 1: API Dedicada (Para todo menos IG local)
@@ -89,9 +99,9 @@ async def descargar_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
                 'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best'
             }
-            # Inyectamos el archivo de texto a yt-dlp
-            if os.path.exists(COOKIE_FILE):
-                ydl_opts['cookiefile'] = COOKIE_FILE
+            # Inyectamos la copia editable del archivo de texto a yt-dlp
+            if os.path.exists(WORKING_COOKIE_FILE):
+                ydl_opts['cookiefile'] = WORKING_COOKIE_FILE
 
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url_original, download=False)
@@ -117,12 +127,11 @@ async def descargar_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         await mensaje_estado.edit_text("⬇️ *Descargando archivo acelerado...*", parse_mode='Markdown')
         
-        # Preparamos el comando de aria2c
         comando_aria = ["aria2c", "--user-agent", "Mozilla/5.0", "-x", "8", "-s", "8", "-o", filename]
         
-        # Si aria2c necesita bajar de los servidores de Meta, le damos las cookies también
-        if os.path.exists(COOKIE_FILE):
-            comando_aria.extend(["--load-cookies", COOKIE_FILE])
+        # Le pasamos la copia editable a aria2c también
+        if os.path.exists(WORKING_COOKIE_FILE):
+            comando_aria.extend(["--load-cookies", WORKING_COOKIE_FILE])
             
         comando_aria.append(video_url)
         subprocess.run(comando_aria, check=True)
